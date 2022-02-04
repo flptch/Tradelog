@@ -1,0 +1,646 @@
+#!/bin/bash
+
+################################################################################
+#
+#   @file tradelog
+#   @author Filip Tichy
+#   login: xtichy31
+#   $Date: 2021-04-04
+#   @brief script for analysing the system of stock market trading
+#
+################################################################################
+
+export POSIXLY_CORRECT=yes
+export LC_ALL=C
+
+#####################
+# THE HELP FUNCTION #
+#####################
+
+echo_help() {
+    echo "USAGE:"
+    echo "tradelog [-h|--help]"
+    echo "tradelog [FILTER] [COMMAND] [LOG [LOG2 [...]]]"
+    echo "Command guide:"
+    echo "list-tick ... shows the list of tickers"
+    echo "profit ... shows the list of profits of closed deals"
+    echo "pos ... shows the list of currently held deals from the max to the min"
+    echo "last-price ... shows the last known price of every single ticker"
+    echo "high-ord ... shows the histogram of number of transactions according to ticker"
+    echo "graph-pos ... shows the graph of held deals according to ticker"
+    echo "Filter guide:"
+    echo "-a DATETIME ... -after: records only after the exact DATETIME (Format is: YYYY-MM-DD HH:MM:SS"
+    echo "-b DATETIME ... -before: records only brefore the exact DATETIME"
+    echo "-t TICKER ... only records which has the same ticker as user entered"
+    echo "-w width ... set the width of graphs"
+    echo ""
+    echo "ENJOY!"
+}
+
+#######################################
+# CREATING VARIABLES FOR FUTURE USAGE #
+#######################################
+
+COMMAND=""
+DATETIME=""
+TICKER=""
+WIDTH=""
+LOG_FILES=""
+GZ_LOG_FILES=""
+READ_INPUT=""
+SUM=0
+
+#######################################################################
+# SEARCHING FOR LOG-FILES AND MERGING THEIR CONTENT INTO ONE VARIABLE #
+#######################################################################
+
+for i in "$@"; do
+    case $i in
+    *.log)
+        LOG_FILES="$i $LOG_FILES"
+        x=$(cat $i)
+        if [ -z "$READ_INPUT" ]; then
+            READ_INPUT="$x"
+        else
+            READ_INPUT="$READ_INPUT
+$x"
+        fi
+        ;;
+    # gz files
+    *.gz)
+        GZ_LOG_FILES="$i $GZ_LOG_FILES"
+        y=$(gunzip -d -c $i | cat)
+        if [ -z "$READ_INPUT" ]; then
+            READ_INPUT="$y"
+        else
+            READ_INPUT="$READ_INPUT
+$y"
+        fi
+        ;;
+    -h | --help)
+        echo_help
+        exit 0
+        ;;
+    esac
+done
+
+FILTERED=$(echo "$READ_INPUT")
+TICKERED=""
+
+##########################################################
+# IF NO LOG FILE WAS ENTERED, READING CONTENT FROM STDIN #
+##########################################################
+
+if [ -z "$LOG_FILES" ] && [ -z "$GZ_LOG_FILES" ]; then
+    while read LINE; do
+        if [ -z "$FILTERED" ]; then
+            FILTERED=$(printf "$LINE")
+        else
+            FILTERED=$(printf "$FILTERED""\n""$LINE")
+        fi
+    done
+fi
+
+###################################################################
+# SAVING COMMAND INTO VARIABLE AND FILTERING THE CONTENT OF INPUT #
+###################################################################
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+
+    #################################################
+    # SAVING COMMAND INTO VARIABLE FOR FUTURE USAGE #
+    #################################################
+
+    list-tick | profit | pos | last-price | hist-ord | graph-pos)
+        if [ -z "$COMMAND" ]; then
+            COMMAND="$1"
+        else
+            echo "There can be only one command!"
+            exit 1
+        fi
+
+        shift
+        ;;
+
+    ################
+    # CALLING HELP #
+    ################
+
+    -h | --help)
+        echo_help
+        exit 0
+        ;;
+
+    ##########################################
+    # FILTER RECORDS ONLY AFTER CERTAIN TIME #
+    ##########################################
+
+    -a)
+        DATETIME="$2"
+
+        ######################################
+        # CHECKING IF VALID DATE WAS ENTERED #
+        ######################################
+
+        echo "$DATETIME" | grep -q "[0-2][0-9][0-9][0-9][-][0-1][0-9][-][0-3][0-9][ ][0-2][0-9][:][0-6][0-9][:][0-6][0-9]"
+        ERROR=$?
+        if [ $ERROR -ne 0 ]; then
+            echo "You entered the invalid date format: '$DATETIME'"
+            exit 1
+        fi
+
+        if [ -z "$TICKERED" ]; then
+            FILTERED=$(echo "$FILTERED" | awk 'FNR>0 && DATETIME<$1' FS=';' DATETIME="$DATETIME")
+        else
+            FILTERED=$(echo "$TICKERED" | awk 'FNR>0 && DATETIME<$1' FS=';' DATETIME="$DATETIME")
+        fi
+        shift
+        shift
+        ;;
+
+    ###########################################
+    # FILTER RECORDS ONLY BEFORE A CERTAIN TIME #
+    ###########################################
+
+    -b)
+        DATETIME="$2"
+
+        ######################################
+        # CHECKING IF VALID DATE WAS ENTERED #
+        ######################################
+
+        echo "$DATETIME" | grep -q "[0-2][0-9][0-9][0-9][-][0-1][0-9][-][0-3][0-9][ ][0-2][0-9][:][0-6][0-9][:][0-6][0-9]"
+        ERROR=$?
+        if [ $ERROR -ne 0 ]; then
+            echo "You entered the invalid date format: '$DATETIME'"
+            exit 1
+        fi
+
+        if [ -z "$TICKERED" ]; then
+            FILTERED=$(echo "$FILTERED" | awk 'FNR>0 && DATETIME>$1' FS=';' DATETIME="$DATETIME")
+        else
+            FILTERED=$(echo "$TICKERED" | awk 'FNR>0 && DATETIME>$1' FS=';' DATETIME="$DATETIME")
+        fi
+        shift
+        shift
+        ;;
+
+    #############################################
+    # FILTER RECORDS ONLY WITH A CERTAIN TICKER #
+    #############################################
+
+    -t)
+        TICKER="$2"
+
+        #########################################################
+        # CHECKING IF THE TICKER STRING CONTAINS BANNED SYMBOLS #
+        #########################################################
+
+        case "$TICKER" in
+        *";"* | *" "*)
+            echo "Invalid symbol in the ticker string!"
+            exit 1
+            ;;
+        esac
+
+        if [ -z "$TICKERED" ]; then
+            TICKERED="$(echo "$FILTERED" | awk 'FNR>0 && TICKER==$2' FS=';' TICKER="$TICKER")"
+        else
+            TICKERED="$TICKERED
+$(echo "$FILTERED" | awk 'FNR>0 && TICKER==$2' FS=';' TICKER="$TICKER")"
+        fi
+
+        shift
+        shift
+        ;;
+
+    ###############################
+    # SETS THE WIDTH OF THE GRAPH #
+    ###############################
+
+    -w)
+
+        ###########################################################################
+        # CHECKING IF WIDTH HAS NEGATIVE VALUE OR IF THERE IS MORE THAN ONE VALUE #
+        ###########################################################################
+
+        if [ -z $WIDTH ]; then
+            WIDTH=$2
+        else
+            echo "There can be only one value of width!"
+            exit 1
+        fi
+
+        if [ $WIDTH -lt 0 ]; then
+            echo "The width value has to be greater than 0!"
+            exit 1
+        fi
+
+        shift
+        shift
+        ;;
+
+    #########################################
+    # LOG FILES ARE ALREADY IN THE VARIABLE #
+    #########################################
+
+    *.log | *.gz)
+        shift
+        ;;
+
+    #######################################
+    # CHECKING FOR SOME INVALID ARGUMENTS #
+    #######################################
+
+    *)
+        echo "You entered the invalid argument, for more information type ./tradelog -h."
+        exit 1
+        ;;
+    esac
+done
+
+###############################################################################################
+# IF FILTERING BY TICKERS WAS APPLIED THEN THE FILTERED VARIABLE IS SET TO THE VALUE TICKERED #
+###############################################################################################
+
+if [ "${#TICKERED}" -lt "${#FILTERED}" ] && [ -n "$TICKERED" ]; then
+    FILTERED=$(echo "$TICKERED" | sort)
+fi
+
+SUM=0
+
+###########################################
+# SHOWS THE TICKERS WHICH ARE IN THE LIST #
+###########################################
+
+if [ "$COMMAND" = "list-tick" ]; then
+    echo "$FILTERED" | awk '{print $2}' FS=';' | sort -u
+    exit 0
+
+##########################
+# SHOWS THE TOTAL PROFIT #
+##########################
+
+elif [ "$COMMAND" = "profit" ]; then
+    if [ -z "$FILTERED" ]; then
+        echo "0.00"
+    else
+        SUM_OF_SELLS=$(echo "$FILTERED" | awk 'FNR>0 && "sell"==$3' FS=';' | awk -F ';' -v OFMT='%.2f' '{SUM+=$4*$6}END{print SUM}')
+        SUM_OF_BUYS=$(echo "$FILTERED" | awk 'FNR>0 && "buy"==$3' FS=';' | awk -F ';' -v OFMT='%.2f' '{SUM+=$4*$6}END{print SUM}')
+        echo "$SUM_OF_SELLS - $SUM_OF_BUYS" | bc
+    fi
+    exit 0
+
+########################################
+# SHOWS VALUES OF CURRENTLY HELD DEALS #
+########################################
+
+elif [ "$COMMAND" = "pos" ]; then
+
+    #################################################################
+    # COUNTING THE NUMBER OF HELD UNITS * LAST KNOWN PRICE FOR UNIT #
+    #################################################################
+
+    FILTERED=$(echo "$FILTERED" | awk -F ';' -v OFMT='%.2f' '{
+        if($3 == "buy")
+            {UNITS[$2] += $6}
+        if($3 == "sell")
+            {UNITS[$2] -= $6}
+        {LAST_KNOWN_PRICE[$2] = $4}}
+        END{
+            for(i in UNITS) 
+                print i, ":" , UNITS[i]*LAST_KNOWN_PRICE[i]}' | sort -r -n -t: -k 2,2)
+
+    #############################
+    # FINDING THE LONGEST LINE #
+    #############################
+
+    LONGEST_LINE=$(echo "$FILTERED" | awk -F ':' '{print $2}' | awk ' { if ( length > x ) { x = length; y = $0 } }END{ print y }')
+    LENGTH=$(echo "$LONGEST_LINE" | awk '{print length($0)-1}')
+
+    ######################################
+    # PRINTING CORRECTLY ALLIGNED RESULT #
+    ######################################
+
+    echo "$FILTERED" | awk -F ':' -v var=$LENGTH '{printf "%-10s: %*.2f\n", $1, var, $2}'
+    exit 0
+
+##############################
+# SHOWS THE LAST KNOWN PRICE #
+##############################
+
+elif [ "$COMMAND" = "last-price" ]; then
+
+    ############################################
+    # FINDING THE LENGTH OF THE HIGHEST NUMBER #
+    ############################################
+
+    HIGHEST_NUMBER=0
+    NUMBERS=$(echo "$FILTERED" | sort -r | awk '{print $2,$4}' FS=';' | sort -s -u -k 1,1 | awk '{print $2}')
+    HIGHEST_NUMBER=$(echo "$NUMBERS" | sort -nr | head -n1)
+    LENGTH=$(echo ${#HIGHEST_NUMBER})
+
+    ######################################
+    # PRINTING CORRECTLY ALLIGNED RESULT #
+    ######################################
+
+    echo "$FILTERED" | sort -r | awk '{print $2,$4}' FS=';' | sort -s -u -k 1,1 | awk -v var=$LENGTH '{printf"%-10s: %*.2f\n", $1, var, $2}'
+    exit 0
+
+#######################################################################
+# SHOWS THE HISTOGRAM OF NUMBER OF DEALS ACCORDING TO CERTAIN TICKER #
+#######################################################################
+
+elif [ "$COMMAND" = "hist-ord" ]; then
+
+    #####################################
+    # FINDING THE LONGEST STRING OF '#' #
+    #####################################
+
+    TMP=$(echo "$FILTERED" | awk -F ';' '{UNITS[$2] = UNITS[$2] "#"} END{for(i in UNITS)printf "%-10s: %s\n" ,i, UNITS[i]}' | sort -s -k 1,1)
+    MAX_LENGTH=$(echo "$TMP" | awk -F ':' '{print $2}' | wc -L)
+    MAX_LENGTH=$((MAX_LENGTH - 1))
+
+    ######################################################
+    # IF THE WIDTH IS NOT SET, ONE TRANSACTION = ONE '#' #
+    ######################################################
+
+    if [ -z $WIDTH ]; then
+        echo "$FILTERED" | awk -F ';' '{UNITS[$2] = UNITS[$2] "#"} END{ 
+                                                                    for(i in UNITS) 
+                                                                        printf "%-10s: %s\n" ,i, UNITS[i]}' | sort -s -k 1,1
+        exit 0
+
+    #######################
+    # IF THE WIDTH IS SET #
+    #######################
+
+    else
+
+        ##############################
+        # KOEFICIENT NEEDS TO BE SET #
+        ##############################
+
+        if [[ $WIDTH -gt $MAX_LENGTH ]]; then
+            KOEFICIENT=$(echo "scale=2;$WIDTH/$MAX_LENGTH" | bc -l)
+
+        else
+            KOEFICIENT=$(echo "scale=2;$MAX_LENGTH/$WIDTH" | bc -l)
+        fi
+
+        ##############################################
+        # SETTING THE GRAPH, WHICH I WILL EDIT LATER #
+        ##############################################
+
+        FILTERED=$(echo "$FILTERED" | awk -F ';' -v WIDTH=$KOEFICIENT -v OFMT='%.2f' '{UNITS[$2] = UNITS[$2] "#"}END{
+                                                                    for(i in UNITS)
+        
+                                                                        printf "%-10s: %s\n" ,i, UNITS[i]}' | sort -s -k 1,1)
+
+        #############################################################
+        # ONE VARIABLE FOR GRAPH AND THE SECOND FOR LIST OF TICKERS #
+        #############################################################
+
+        GRAPH=$(echo "$FILTERED" | awk -F ':' '{print $2}')
+        LIST_TICK=$(echo "$FILTERED" | awk -F ':' '{print $1}')
+        IFS='
+'
+        #############################
+        # LOOPING THROUGH THE GRAPH #
+        #############################
+
+        for i in ${GRAPH[*]}; do
+
+            ################################################################################
+            # SETTING THE LENGTH OF LINE, SO THAT I KNOW HOW MANY # I SHOULD ADD OR REMOVE #
+            ################################################################################
+
+            LENGTH_OF_LINE=$(echo "$i" | awk '{print length()-1}')
+
+            #########################################################
+            # SETTING THE FINAL NUMBER OF '#' THE LINE WILL CONTAIN #
+            #########################################################
+
+            if [[ $WIDTH -gt $MAX_LENGTH ]]; then
+                num=$(echo "scale=2; $LENGTH_OF_LINE*$KOEFICIENT" | bc -l)
+
+            else
+                num=$(echo "scale=2; $LENGTH_OF_LINE/$KOEFICIENT" | bc -l)
+            fi
+
+            num=$(echo "$num" | awk '{print int($1)}')
+            i=""
+
+            ##########################
+            # ADDING '#' TO THE LINE #
+            ##########################
+
+            for ((j = 0; j < $num; j++)); do
+                i="$i#"
+            done
+
+            ##########################################
+            # PRINTING THE CORRECTLY ALLIGNED RESULT #
+            ##########################################
+
+            if [ -z "$i" ]; then
+                HEAD=$(echo "$LIST_TICK" | head -n 1)
+                printf "$HEAD:\n"
+                LIST_TICK=$(echo "$LIST_TICK" | sed '1d')
+                k=$((k + 1))
+            else
+                HEAD=$(echo "$LIST_TICK" | head -n 1)
+                printf "$HEAD: $i\n"
+                LIST_TICK=$(echo "$LIST_TICK" | sed '1d')
+            fi
+        done
+    fi
+
+    exit 0
+
+###########################################
+# SHOWS THE GRAPH OF VALUES OF HELD UNITS #
+###########################################
+
+elif [ "$COMMAND" = "graph-pos" ]; then
+
+    ################################
+    # FINDING THE VALUES AS IN POS #
+    ################################
+
+    FILTERED=$(echo "$FILTERED" | awk -F ';' -v OFMT='%.2f' '{
+        if($3 == "buy")
+            {UNITS[$2] += $6}
+        if($3 == "sell")
+            {UNITS[$2] -= $6}
+        {LAST_KNOWN_PRICE[$2] = $4}}
+        END{
+            for(i in UNITS) 
+                print i, ":" , UNITS[i]*LAST_KNOWN_PRICE[i]}' | sort -r -n -t: -k 2,2)
+
+    #################################################
+    # STORING THE LIST OF TICKERS INTO THE VARIABLE #
+    #################################################
+
+    LIST_TICK=$(echo "$FILTERED" | awk -F ':' '{print $1}' | sort)
+
+    ######################################
+    # FINDING LENGTH OF THE LONGEST LINE #
+    ######################################
+
+    LONGEST_LINE=$(echo "$FILTERED" | awk -F ':' '{print $2}' | awk ' { if ( length > x ) { x = length; y = $0 } }END{ print y }')
+    LENGTH=$(echo "$LONGEST_LINE" | awk '{print length($0)-1}')
+
+    ##################################################################
+    # STORING THE CORRECTLY ALLIGNED RESULT OF POS INTO THE VARIABLE #
+    ##################################################################
+
+    FILTERED=$(echo "$FILTERED" | sort | awk -F ':' -v var=$LENGTH '{printf "%-10s: %*.2f\n", $1, var, $2}')
+    FILTERED=$(echo "$FILTERED" | awk -F ':' '{print $2}')
+    num=0
+    HIGHEST_NUMBER=0
+
+    ###################################################
+    # IF THE WIDTH IS NOT SET, THEN EVERY '#' == 1000 #
+    ###################################################
+
+    if [ -z "$WIDTH" ]; then
+        for i in ${FILTERED[*]}; do
+            i=$(echo "$i" | awk '{print int($1)}')
+            if [ $i -lt 0 ]; then
+                while [ $i -lt -1000 ]; do
+                    i=$((i + 1000))
+                    num=$((num + 1))
+                done
+                i=""
+                while [ $num -ne 0 ]; do
+                    i="$i!"
+                    num=$((num - 1))
+                done
+            elif [ $i -gt 0 ]; then
+                while [ $i -gt 1000 ]; do
+                    i=$((i - 1000))
+                    num=$((num + 1))
+                done
+                i=""
+                while [ $num -ne 0 ]; do
+                    i="$i#"
+                    num=$((num - 1))
+                done
+            fi
+
+            ########################################
+            # PRINTING THE CORRECTLY ALLIGNED LINE #
+            ########################################
+
+            if [ -z $i ]; then
+                HEAD=$(echo "$LIST_TICK" | head -n 1)
+                printf "$HEAD:\n" | awk -F ':' '{printf "%-10s:\n", $1}'
+                LIST_TICK=$(echo "$LIST_TICK" | sed '1d')
+            else
+                HEAD=$(echo "$LIST_TICK" | head -n 1)
+                printf "$HEAD: $i\n" | awk -F ':' '{printf "%-10s:%s\n", $1, $2}'
+                LIST_TICK=$(echo "$LIST_TICK" | sed '1d')
+                k=$((k + 1))
+            fi
+        done
+
+    #######################
+    # IF THE WIDTH IS SET #
+    #######################
+
+    else
+
+        #################################################
+        # FINDING THE HIGHEST ABSOLUTE VALUE OF NUMBERS #
+        #################################################
+
+        for i in ${FILTERED[*]}; do
+            i=$(echo "$i" | awk '{print int($1)}')
+            if [ $i -lt 0 ]; then
+                i=$((i * -1))
+            fi
+            if [ $i -gt $HIGHEST_NUMBER ]; then
+                HIGHEST_NUMBER=$i
+            fi
+        done
+
+        ###########################
+        # COUNTING THE KOEFICIENT #
+        ###########################
+
+        KOEFICIENT=$(echo "scale=2;$HIGHEST_NUMBER/$WIDTH" | bc -l)
+
+        ###########################################################
+        # LOOPING THROUGH THE LINES AND ADDING TO THEM '#' OR '!' #
+        ###########################################################
+
+        for k in ${FILTERED[*]}; do
+            k=$(echo "$k" | awk '{print int($1)}')
+
+            ########################################################
+            # COUNTING THE FINAL NUMBER OF '#' OR '!' I SHOULD ADD #
+            ########################################################
+
+            if [ $k -lt 0 ]; then
+                l=$((k * -1))
+                num=$(echo "scale=2; $l/$KOEFICIENT" | bc -l)
+            else
+                num=$(echo "scale=2; $k/$KOEFICIENT" | bc -l)
+            fi
+
+            ########################
+            # ROUNDING THE NUMBERS #
+            ########################
+
+            num=$(echo "$num" | awk '{print int($1)}')
+            k=$(echo "$k" | awk '{print int($1)}')
+
+            ##################################
+            # ADDDING '#' OR '!' TO THE LINE #
+            ##################################
+
+            if [ $k -gt 0 ]; then
+                k=""
+                while [ $num -gt 0 ]; do
+                    k="$k#"
+                    num=$((num - 1))
+                done
+            else
+                k=""
+                while [ $num -gt 0 ]; do
+                    k="$k!"
+                    num=$((num - 1))
+                done
+            fi
+
+            ####################################
+            # PRINTING CORRECTLY ALLIGNED LINE #
+            ####################################
+
+            if [ -z $k ]; then
+                HEAD=$(echo "$LIST_TICK" | head -n 1)
+                printf "$HEAD:\n" | awk -F ':' '{printf "%-10s:\n", $1}'
+                LIST_TICK=$(echo "$LIST_TICK" | sed '1d')
+            else
+                HEAD=$(echo "$LIST_TICK" | head -n 1)
+                printf "$HEAD: $k\n" | awk -F ':' '{printf "%-10s:%s\n", $1, $2}'
+                LIST_TICK=$(echo "$LIST_TICK" | sed '1d')
+            fi
+        done
+    fi
+    exit 0
+fi
+
+#################################################################################
+# IF NO COMMAND WAS ENTERED, IT JUST PRINTS THE FILTERED OR NON-FILTERED RESULT #
+#################################################################################
+
+printf "$FILTERED\n"
+
+exit 0
+
+##############################
+# THE END OF FILE 'TRADELOG' #
+##############################
